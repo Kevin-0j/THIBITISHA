@@ -1,0 +1,20 @@
+{
+  "name": "thibitisha",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Payer-confirmed receipts over USSD, built on Africa's Talking",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}
