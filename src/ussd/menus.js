@@ -6,6 +6,10 @@ const closeShift = require('./flows/closeShift');
 const roomsUsed = require('./flows/roomsUsed');
 const ownerLiability = require('./flows/ownerLiability');
 const ownerToday = require('./flows/ownerToday');
+const payerSummary = require('./flows/payerSummary');
+const confirmPayment = require('./flows/confirmPayment');
+const myReceipts = require('./flows/myReceipts');
+const config = require('../config');
 
 // Who sees what. Option numbers are the position in the list (1-based), so to add a menu item,
 // write a flow file and put it in the right list here.
@@ -19,7 +23,9 @@ function menuFor({ staff, venue, shift }) {
     case 'housekeeper':
       return { title: venue.name, flows: [roomsUsed] };
     case 'owner':
-      return { title: `${venue.name} (owner)`, flows: [ownerLiability, ownerToday] };
+      return { title: `${venue.name} (owner)`, flows: [ownerLiability, ownerToday, payerSummary] };
+    case 'payer':
+      return { title: config.brandName, flows: [confirmPayment, myReceipts] };
     default:
       return { title: venue.name, flows: [] };
   }

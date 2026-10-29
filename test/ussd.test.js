@@ -9,19 +9,25 @@ const config = require('../src/config');
 const { createApp } = require('../src/app');
 const { createMemoryStore, createPostgresStore, demoSeed } = require('../src/services/store');
 const { outbox } = require('../src/services/sms');
+const { outbox: airtimeOutbox } = require('../src/services/airtime');
+const { sweepPendingClaims } = require('../src/services/matcher');
 const { subscriptionActive } = require('../src/services/notify');
+const { shortNairobiDate } = require('../src/time');
 
 const MANAGER = config.demo.managerPhone;
 const CLEANER = config.demo.housekeeperPhone;
 const OWNER = config.demo.ownerPhone;
+const PAYER = '+254722000123';
+const CODE = config.demo.venueCode;
 
 async function seedPostgres(url) {
   const pool = new Pool({ connectionString: url });
   const seed = demoSeed(config.demo);
-  await pool.query('truncate venues, staff, shifts, transactions, housekeeping_reports cascade');
+  await pool.query('truncate venues, staff, shifts, transactions, housekeeping_reports, payer_claims cascade');
   // The append-only trigger blocks deletes but not truncate, which is what we want in tests.
   for (const v of seed.venues) {
-    await pool.query('insert into venues (id, name, plan, owner_phone) values ($1, $2, $3, $4)', [v.id, v.name, v.plan, v.ownerPhone]);
+    await pool.query('insert into venues (id, name, plan, owner_phone, code, template, reward_kes) values ($1, $2, $3, $4, $5, $6, $7)',
+      [v.id, v.name, v.plan, v.ownerPhone, v.code, v.template, v.rewardKes]);
   }
   for (const s of seed.staff) {
     await pool.query('insert into staff (id, venue_id, phone_number, full_name, role) values ($1, $2, $3, $4, $5)',
@@ -46,6 +52,7 @@ for (const [name, makeStore] of backends) {
 
     beforeEach(async () => {
       outbox.length = 0;
+      airtimeOutbox.length = 0;
       store = await makeStore();
       server = createApp({ store }).listen(0);
       await new Promise((r) => server.once('listening', r));
@@ -85,8 +92,8 @@ for (const [name, makeStore] of backends) {
 
     const openShift = (float = 500) => run(MANAGER, `1*${float}*1`);
 
-    test('unknown numbers are refused', async () => {
-      assert.equal(await post('+254700999999', 's1', ''), 'END This number is not registered. Ask the owner to add you.');
+    test('unknown numbers get the payer menu', async () => {
+      assert.equal(await post('+254700999999', 's1', ''), `CON ${config.brandName}\n1. Confirm a Payment\n2. My Receipts`);
     });
 
     test('manager with no shift can only open one', async () => {
@@ -180,9 +187,92 @@ for (const [name, makeStore] of backends) {
       assert.equal(await run(OWNER, '1'), 'END No open shifts right now.');
       await openShift(500);
       await run(MANAGER, '1*12*1500*1');
-      assert.equal(await session(OWNER)(''), "CON Backyard Bar & Motel (owner)\n1. Cash Held Now\n2. Today's Takings");
+      assert.equal(await session(OWNER)(''), "CON Backyard Bar & Motel (owner)\n1. Cash Held Now\n2. Today's Takings\n3. Payer Confirmations");
       assert.equal(await run(OWNER, '1'), 'END Cash held now:\nDemo Manager: KES 2,000\nTotal: KES 2,000');
       assert.equal(await run(OWNER, '2'), 'END Logged today: KES 1,500\nRoom payments: 1');
+    });
+
+    // ---- Payer confirmations -----------------------------------------------------------------
+
+    const confirm = (room, amount, mpesa = '0', phone = PAYER) => run(phone, `1*${CODE}*${room}*${amount}*${mpesa}*1`);
+    const smsTo = (phone) => outbox.filter((m) => m.to === phone);
+
+    test('payer screens: place code, room, amount, M-Pesa code, consent', async () => {
+      const dial = session(PAYER);
+      await dial('');
+      assert.equal(await dial('1'), 'CON Enter the place code\n(on the notice board, or ask the staff):');
+      assert.equal(await dial(`1*${CODE}`), 'CON Backyard Bar & Motel\nEnter your room number:');
+      assert.equal(await dial(`1*${CODE}*12`), 'CON Amount you paid (KES):');
+      assert.equal(await dial(`1*${CODE}*12*1500`), 'CON M-Pesa code, or 0 if you paid cash:');
+      assert.equal(await dial(`1*${CODE}*12*1500*0`),
+        'CON Confirm KES 1,500 for room 12 at Backyard Bar & Motel?\nYour number will be shared with the owner.\n1. Confirm\n2. Cancel');
+      assert.equal(await dial(`1*${CODE}*12*1500*0*1`),
+        "END Thank you. We will SMS your receipt once it matches the manager's record.");
+    });
+
+    test('payer confirms first, staff log then matches: receipt and airtime', async () => {
+      await openShift(0);
+      await confirm('12', 1500);
+      assert.equal(smsTo(PAYER).length, 0);
+      await run(MANAGER, '1*12*1500*1');
+      assert.match(smsTo(PAYER)[0].message, /receipt: KES 1,500 for room 12, Backyard Bar & Motel, .+ Confirmed by the manager\. Ref TB-[0-9A-F]{8}$/);
+      assert.deepEqual(airtimeOutbox, [{ phoneNumber: PAYER, amountKes: 10 }]);
+      assert.equal(await run(PAYER, '2'), `END ${shortNairobiDate(new Date())} Backyard Bar & KES 1,500: receipt sent`);
+    });
+
+    test('staff logs first, payer confirms the same amount: matched at once', async () => {
+      await openShift(0);
+      await run(MANAGER, '1*12*1500*1');
+      assert.equal(await confirm('12', 1500), 'END Confirmed. Your receipt is on its way by SMS.');
+      assert.equal(smsTo(PAYER).length, 1);
+    });
+
+    test('amounts differ: the owner is alerted, no receipt or reward', async () => {
+      await openShift(0);
+      await run(MANAGER, '1*12*1000*1');
+      outbox.length = 0;
+      assert.equal(await confirm('12', 1500, 'SJK4H7XQ2P'), 'END Thank you. The owner has your confirmation and will follow up.');
+      assert.equal(smsTo(PAYER).length, 0);
+      assert.equal(airtimeOutbox.length, 0);
+      assert.match(smsTo(OWNER)[0].message,
+        new RegExp(`ALERT Backyard Bar & Motel: payer \\${PAYER}, room 12, says they paid KES 1,500 \\(M-Pesa SJK4H7XQ2P\\) on .+\\. Manager logged KES 1,000\\.$`));
+      assert.equal(await run(OWNER, '3'),
+        'END Backyard Bar & Motel, today\nMatched: 0\nNot matching: 1\nWaiting for staff log: 0\nAt risk: KES 500');
+    });
+
+    test('nothing logged within the window: the sweep alerts the owner once', async () => {
+      await confirm('7', 2000);
+      assert.equal(await sweepPendingClaims(store), 0);
+      const later = new Date(Date.now() + (config.payer.matchWindowMinutes + 1) * 60 * 1000);
+      assert.equal(await sweepPendingClaims(store, later), 1);
+      assert.equal(await sweepPendingClaims(store, later), 0);
+      assert.equal(smsTo(OWNER).length, 1);
+      assert.match(smsTo(OWNER)[0].message, /room 7, says they paid KES 2,000 on .+\. The manager logged nothing within 24 hours\.$/);
+      assert.match(await run(OWNER, '3'), /Not matching: 1\nWaiting for staff log: 0\nAt risk: KES 2,000$/);
+    });
+
+    test('one staff log backs only one payer confirmation', async () => {
+      await openShift(0);
+      await run(MANAGER, '1*12*1500*1');
+      await confirm('12', 1500);
+      assert.equal(await confirm('12', 1500, '0', '+254733000456'),
+        "END Thank you. We will SMS your receipt once it matches the manager's record.");
+    });
+
+    test('a retried payer request is saved once', async () => {
+      const dial = session(PAYER);
+      await dial('');
+      await dial(`1*${CODE}*12*1500*0*1`);
+      await dial(`1*${CODE}*12*1500*0*1`);
+      assert.match(await run(OWNER, '3'), /Waiting for staff log: 1\n/);
+    });
+
+    test('payer input errors', async () => {
+      assert.equal(await run(PAYER, '1*9999'), 'END Place code not found. Please dial again.');
+      assert.equal(await run(PAYER, '1*44'), 'END Invalid place code. Please dial again.');
+      assert.match(await run(PAYER, `1*${CODE}*12*1500*ABC`), /^END M-Pesa codes have 10 letters and digits/);
+      assert.equal(await run(PAYER, `1*${CODE}*12*1500*0*2`), 'END Cancelled. Nothing was saved.');
+      assert.equal(await run(PAYER, '2'), 'END No confirmed payments yet.');
     });
 
     test('bad input is rejected without saving', async () => {
