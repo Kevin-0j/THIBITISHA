@@ -1,4 +1,5 @@
 const crypto = require('node:crypto');
+const { TEMPLATES: templateDefaults } = require('../../templates');
 
 // In-memory store with the same interface as postgres.js. Used when DATABASE_URL is empty:
 // the sandbox simulator, local demos and tests. Everything is lost on restart.
@@ -13,6 +14,7 @@ function createMemoryStore(seed = {}) {
     shifts: [],
     transactions: [],
     housekeeping: [],
+    claims: [],
   };
   const id = () => crypto.randomUUID();
   const venueTxsSince = (venueId, since) =>
@@ -46,8 +48,9 @@ function createMemoryStore(seed = {}) {
       if (tx.ussdSessionId && db.transactions.some((t) => t.ussdSessionId === tx.ussdSessionId)) {
         return { duplicate: true };
       }
-      db.transactions.push({ id: id(), createdAt: new Date(), roomNumber: null, ...tx });
-      return { duplicate: false };
+      const transaction = { id: id(), createdAt: new Date(), roomNumber: null, ...tx };
+      db.transactions.push(transaction);
+      return { duplicate: false, transaction };
     },
 
     async getShiftTotals(shiftId) {
@@ -85,6 +88,68 @@ function createMemoryStore(seed = {}) {
       return { duplicate: false };
     },
 
+    async getVenueByCode(code) {
+      return db.venues.find((v) => v.code === code) || null;
+    },
+
+    async addPayerClaim(claim) {
+      const existing = claim.ussdSessionId && db.claims.find((c) => c.ussdSessionId === claim.ussdSessionId);
+      if (existing) return { claim: existing, duplicate: true };
+      const row = { id: id(), status: 'pending', transactionId: null, createdAt: new Date(), resolvedAt: null, mpesaCode: null, ...claim };
+      db.claims.push(row);
+      return { claim: row, duplicate: false };
+    },
+
+    async getClaim(claimId) {
+      return db.claims.find((c) => c.id === claimId) || null;
+    },
+
+    // Room payments in the window that no payer confirmation has claimed yet.
+    async findUnclaimedRoomPayments({ venueId, roomNumber, from, to }) {
+      const claimed = new Set(db.claims.map((c) => c.transactionId).filter(Boolean));
+      const voided = new Set(db.transactions.filter((t) => t.type === 'void').map((t) => t.voidsTransactionId));
+      return db.transactions
+        .filter((t) => t.venueId === venueId && t.type === 'room_cash' && t.roomNumber === roomNumber
+          && t.createdAt >= from && t.createdAt <= to && !claimed.has(t.id) && !voided.has(t.id))
+        .sort((a, b) => a.createdAt - b.createdAt);
+    },
+
+    async findPendingClaims({ venueId, roomNumber, from, to }) {
+      return db.claims
+        .filter((c) => c.venueId === venueId && c.roomNumber === roomNumber && c.status === 'pending'
+          && c.createdAt >= from && c.createdAt <= to)
+        .sort((a, b) => a.createdAt - b.createdAt);
+    },
+
+    // Only a pending claim can be settled, and only once; returns false if someone got there first.
+    async resolveClaim({ claimId, transactionId, status }) {
+      const claim = db.claims.find((c) => c.id === claimId);
+      if (!claim || claim.status !== 'pending') return false;
+      if (transactionId && db.claims.some((c) => c.transactionId === transactionId)) return false;
+      Object.assign(claim, { status, transactionId, resolvedAt: new Date() });
+      return true;
+    },
+
+    async listPendingClaimsBefore(cutoff) {
+      return db.claims
+        .filter((c) => c.status === 'pending' && c.createdAt < cutoff)
+        .map((claim) => ({ claim, venue: db.venues.find((v) => v.id === claim.venueId) }));
+    },
+
+    async listClaimsSince(venueId, since) {
+      return db.claims
+        .filter((c) => c.venueId === venueId && c.createdAt >= since)
+        .map((c) => ({ ...c, loggedAmount: (db.transactions.find((t) => t.id === c.transactionId) || {}).amount ?? null }));
+    },
+
+    async recentClaimsForPayer(payerPhone, limit) {
+      return db.claims
+        .filter((c) => c.payerPhone === payerPhone)
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, limit)
+        .map((c) => ({ ...c, venueName: db.venues.find((v) => v.id === c.venueId).name }));
+    },
+
     async close() {},
   };
   return store;
@@ -93,11 +158,16 @@ function createMemoryStore(seed = {}) {
 // A demo venue with one person per role, so the simulator works out of the box.
 function demoSeed(demo) {
   const venueId = crypto.randomUUID();
+  const template = demo.template === 'rent' ? 'rent' : 'lodge';
+  const rewardKes = demo.rewardKes !== undefined && demo.rewardKes !== '' ? Number(demo.rewardKes) : templateDefaults[template].defaultRewardKes;
   const person = (phoneNumber, fullName, role) => ({
     id: crypto.randomUUID(), venueId, phoneNumber, fullName, role, isActive: true,
   });
   return {
-    venues: [{ id: venueId, name: demo.venueName, plan: demo.venuePlan, ownerPhone: demo.ownerPhone, paidUntil: null }],
+    venues: [{
+      id: venueId, name: demo.venueName, plan: demo.venuePlan, ownerPhone: demo.ownerPhone, paidUntil: null,
+      code: demo.venueCode, template, rewardKes,
+    }],
     staff: [
       person(demo.managerPhone, 'Demo Manager', 'manager'),
       person(demo.housekeeperPhone, 'Demo Cleaner', 'housekeeper'),

@@ -3,7 +3,7 @@ require('dotenv').config();
 // Every brand-, venue- and vendor-specific setting comes from here, so a rename is a one-line .env change.
 const config = {
   port: Number(process.env.PORT) || 3000,
-  brandName: process.env.BRAND_NAME || 'Shadow POS',
+  brandName: process.env.BRAND_NAME || 'Thibitisha',
 
   ussd: {
     // Safe per-screen length on most handsets; longer text is cut off silently.
@@ -31,6 +31,13 @@ const config = {
     senderId: process.env.AT_SENDER_ID || '',
   },
 
+  // Payer confirmations: how long a payer's confirmation waits for a matching staff log before
+  // the owner is told nothing was logged, and how often that check runs.
+  payer: {
+    matchWindowMinutes: Number(process.env.MATCH_WINDOW_MINUTES) || 24 * 60,
+    sweepIntervalMs: 60 * 1000,
+  },
+
   // Seed data for the in-memory store. Type these numbers into the sandbox simulator.
   demo: {
     venueName: process.env.DEMO_VENUE_NAME || 'Backyard Bar & Motel',
@@ -38,6 +45,12 @@ const config = {
     managerPhone: process.env.DEMO_MANAGER_PHONE || '+254711000001',
     housekeeperPhone: process.env.DEMO_HOUSEKEEPER_PHONE || '+254711000002',
     ownerPhone: process.env.DEMO_OWNER_PHONE || '+254711000003',
+    // Payers dial in and enter this code to say which place they paid.
+    venueCode: process.env.DEMO_VENUE_CODE || '4471',
+    // 'lodge' (rooms, manager, airtime reward) or 'rent' (units, caretaker, no reward).
+    template: process.env.DEMO_TEMPLATE || 'lodge',
+    // Airtime sent to a payer when their confirmation matches. Empty = 10 for lodges, 0 for rent.
+    rewardKes: process.env.DEMO_REWARD_KES,
   },
 };
 

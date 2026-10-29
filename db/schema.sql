@@ -14,6 +14,9 @@ create table venues (
                   check (plan in ('small', 'standard', 'plus', 'site')),  -- see UNIT_ECONOMICS.md
   county          text,
   paid_until      date,                           -- Ksh 100/day pass: block USSD logging once this lapses
+  code            text unique check (code ~ '^[0-9]{3,6}$'),  -- place code payers enter (on the notice board)
+  template        text not null default 'lodge' check (template in ('lodge', 'rent')),
+  reward_kes      integer not null default 0 check (reward_kes >= 0),  -- airtime per matched payer confirmation
   created_at      timestamptz not null default now()
 );
 
@@ -88,6 +91,27 @@ create table housekeeping_reports (
 
 create index housekeeping_venue_created on housekeeping_reports (venue_id, created_at desc);
 
+-- Payer confirmations: the person who paid says what they paid, for which room or unit. Matched
+-- against room_cash transactions (see src/services/matcher.js). Status moves once, from pending to
+-- matched, mismatch (amounts differ) or unlogged (no staff log within the match window).
+create table payer_claims (
+  id               uuid primary key default gen_random_uuid(),
+  venue_id         uuid not null references venues(id),
+  payer_phone      text not null,                -- E.164; the payer agreed on screen to share it with the owner
+  room_number      text not null,
+  amount           bigint not null check (amount > 0),
+  mpesa_code       text,                         -- optional, so the owner can check the M-Pesa statement
+  status           text not null default 'pending' check (status in ('pending', 'matched', 'mismatch', 'unlogged')),
+  transaction_id   uuid unique references transactions(id),  -- a staff log backs at most one claim
+  ussd_session_id  text unique,
+  created_at       timestamptz not null default now(),
+  resolved_at      timestamptz
+);
+
+create index payer_claims_venue_created on payer_claims (venue_id, created_at desc);
+create index payer_claims_pending on payer_claims (created_at) where status = 'pending';
+create index payer_claims_payer on payer_claims (payer_phone, created_at desc);
+
 -- Shift liability is computed, not stored, so it can never drift from the ledger.
 -- If it ever gets slow, add a running-total column on shifts maintained by an insert trigger.
 create or replace view shift_liabilities as
@@ -116,6 +140,7 @@ alter table staff        enable row level security;
 alter table shifts       enable row level security;
 alter table transactions enable row level security;
 alter table housekeeping_reports enable row level security;
+alter table payer_claims enable row level security;
 
 create policy owner_reads_venue on venues
   for select using (owner_user_id = auth.uid());
@@ -126,6 +151,9 @@ create policy owner_reads_shifts on shifts
 create policy owner_reads_transactions on transactions
   for select using (venue_id in (select id from venues where owner_user_id = auth.uid()));
 create policy owner_reads_housekeeping on housekeeping_reports
+  for select using (venue_id in (select id from venues where owner_user_id = auth.uid()));
+
+create policy owner_reads_payer_claims on payer_claims
   for select using (venue_id in (select id from venues where owner_user_id = auth.uid()));
 
 -- Make the view respect the RLS of the tables underneath it (Postgres 15+, which Supabase runs).

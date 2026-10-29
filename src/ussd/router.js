@@ -44,10 +44,9 @@ async function shiftForSession(sessionId, staff, store) {
 }
 
 async function route({ sessionId, phoneNumber, text }, store) {
+  // Staff and owners are known by their number. Anyone else is a payer confirming a payment.
   const found = await store.getStaffByPhone(phoneNumber);
-  if (!found) return end('This number is not registered. Ask the owner to add you.');
-
-  const { staff, venue } = found;
+  const { staff, venue } = found || { staff: { role: 'payer' }, venue: null };
   const shift = await shiftForSession(sessionId, staff, store);
   const ctx = { sessionId, phoneNumber, staff, venue, shift, store };
   const menu = menuFor(ctx);
@@ -67,7 +66,8 @@ async function route({ sessionId, phoneNumber, text }, store) {
 
   const values = [];
   for (let i = 0; i < Math.min(answers.length, flow.steps.length); i += 1) {
-    const result = flow.steps[i].parse(answers[i]);
+    // A step may look something up (the payer's place code), so parse can be async.
+    const result = await flow.steps[i].parse(answers[i], ctx);
     if (!result.ok) return end(`${result.error} Please dial again.`);
     values.push(result.value);
   }

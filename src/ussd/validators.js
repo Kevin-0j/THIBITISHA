@@ -26,4 +26,19 @@ function roomNumber(raw) {
   return { ok: true, value: s };
 }
 
-module.exports = { amount, cash, roomCount, roomNumber };
+// The code on the notice board that tells us which place the payer paid.
+function placeCode(raw) {
+  const s = String(raw).trim();
+  if (!/^\d{3,6}$/.test(s)) return { ok: false, error: 'Invalid place code.' };
+  return { ok: true, value: s };
+}
+
+// Optional M-Pesa transaction code (10 letters and digits), or 0 for cash.
+function mpesaCode(raw) {
+  const s = String(raw).trim().toUpperCase();
+  if (s === '0') return { ok: true, value: null };
+  if (!/^[A-Z0-9]{10}$/.test(s)) return { ok: false, error: 'M-Pesa codes have 10 letters and digits.' };
+  return { ok: true, value: s };
+}
+
+module.exports = { amount, cash, roomCount, roomNumber, placeCode, mpesaCode };
